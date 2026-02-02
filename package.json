@@ -1,0 +1,23 @@
+{
+  "name": "territorial-bot",
+  "version": "1.0.0",
+  "main": "server/index.js",
+  "scripts": {
+    "server": "node server/index.js",
+    "client": "cd client && npm run dev",
+    "setup": "cd client && npm install && cd .. && npm install && npm run dev",
+    "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "build":"npx puppeteer browsers install chrome && cd client && npm install vite && npm run build && cd ..",
+    "start":"npm run build && npm run setup"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "Territorial.io Bot",
+  "dependencies": {
+    "concurrently": "^9.2.1",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "puppeteer": "^24.36.1"
+  }
+}
