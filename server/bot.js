@@ -801,29 +801,12 @@ async function startBot() {
   }
 }
 
-async function stopBot() {
-  botState.running = false;
-  updateState({ currentStep: 'Stopping...' });
-
-  if (browser) {
-    try {
-      await browser.close();
-    } catch (e) {
-      console.log('Error closing browser:', e.message);
-    }
-    browser = null;
-    page = null;
+(async () => {
+  try {
+    console.log('Auto-starting bot...');
+    await startBot();
+  } catch (err) {
+    console.error('Fatal startup error:', err);
+    process.exit(1);
   }
-
-  updateState({ currentStep: 'Stopped' });
-}
-
-function getState() {
-  return botState;
-}
-
-function togglePreview(enabled) {
-  botState.previewEnabled = enabled;
-}
-
-module.exports = { startBot, stopBot, getState, takeScreenshot, togglePreview };
+})();
