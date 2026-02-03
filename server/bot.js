@@ -30,20 +30,22 @@ const INDIAN_CITIES = [
 
 const MAX_RETRIES = 3;
 const NAVIGATION_TIMEOUT = 30000;
-const CONNECTION_CHECK_INTERVAL = 5000;
+const CONNECTION_CHECK_INTERVAL = 5000; // Check connection every 5 seconds
 
 let browser = null;
 let page = null;
 let botState = {
+  running: false,
   currentStep: 'idle',
   stepTimer: 0,
   currentLoop: 0,
   totalLoops: 20,
   account: loadData(ACCOUNT_FILE, null),
+  previewEnabled: false,
+  lastScreenshot: null,
   errorCount: 0,
   lastError: null,
-  connectionIssues: 0,
-  startTime: new Date().toISOString()
+  connectionIssues: 0
 };
 
 function delay(ms) {
@@ -76,7 +78,6 @@ function saveData(file, data) {
 
 function updateState(updates) {
   Object.assign(botState, updates);
-  console.log(`[${new Date().toISOString()}] ${botState.currentStep}`);
 }
 
 function logError(error, context) {
@@ -90,6 +91,7 @@ function logError(error, context) {
   };
 }
 
+// NEW: Check if error is connection-related
 function isConnectionError(error) {
   const connectionErrors = [
     'ERR_CONNECTION_CLOSED',
@@ -120,12 +122,14 @@ function isConnectionError(error) {
   );
 }
 
+// NEW: Enhanced page health check
 async function checkPageHealth() {
   if (!page || page.isClosed()) {
     return false;
   }
   
   try {
+    // Try to evaluate a simple expression
     await page.evaluate(() => true);
     return true;
   } catch (error) {
@@ -134,14 +138,17 @@ async function checkPageHealth() {
   }
 }
 
+// NEW: Auto-refresh on connection issues
 async function handleConnectionError(error, context, currentUrl = null) {
   console.log(`Connection error detected in ${context}: ${error.message}`);
   botState.connectionIssues++;
   
+  // Try to refresh the page
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       console.log(`Attempting to recover connection (attempt ${attempt}/3)...`);
       
+      // Check if page still exists
       const isHealthy = await checkPageHealth();
       
       if (!isHealthy) {
@@ -153,6 +160,7 @@ async function handleConnectionError(error, context, currentUrl = null) {
         return true;
       }
       
+      // Try to reload the page
       await page.reload({ 
         waitUntil: 'domcontentloaded',
         timeout: NAVIGATION_TIMEOUT 
@@ -181,6 +189,17 @@ async function handleConnectionError(error, context, currentUrl = null) {
   return false;
 }
 
+async function takeScreenshot() {
+  if (!page || !botState.previewEnabled) return null;
+  try {
+    const screenshot = await page.screenshot({ encoding: 'base64', type: 'jpeg', quality: 50 });
+    botState.lastScreenshot = screenshot;
+    return screenshot;
+  } catch (e) {
+    return null;
+  }
+}
+
 async function sendToDiscord(webhookUrl, content, options = {}) {
   const { isFile = false, filename = 'file.txt', message = '' } = options;
   try {
@@ -201,6 +220,7 @@ async function sendToDiscord(webhookUrl, content, options = {}) {
   }
 }
 
+// UPGRADED: Safe navigation with connection error handling
 async function safeGoto(url, retries = MAX_RETRIES) {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
@@ -208,15 +228,17 @@ async function safeGoto(url, retries = MAX_RETRIES) {
         waitUntil: 'domcontentloaded',
         timeout: NAVIGATION_TIMEOUT 
       });
-      botState.connectionIssues = 0;
+      botState.connectionIssues = 0; // Reset on success
       return true;
     } catch (error) {
       logError(error, `Navigation to ${url} - Attempt ${attempt}/${retries}`);
       
+      // Check if it's a connection error
       if (isConnectionError(error)) {
         console.log('Connection error detected during navigation');
         await handleConnectionError(error, 'safeGoto', url);
         
+        // If not last attempt, try again
         if (attempt < retries) {
           await delay(5000);
           continue;
@@ -226,6 +248,7 @@ async function safeGoto(url, retries = MAX_RETRIES) {
       if (attempt === retries) {
         console.log(`Failed to navigate after ${retries} attempts, will retry with fresh browser...`);
         await ensureBrowser();
+        // One final attempt with new browser
         try {
           await page.goto(url, { 
             waitUntil: 'domcontentloaded',
@@ -244,9 +267,11 @@ async function safeGoto(url, retries = MAX_RETRIES) {
   return false;
 }
 
+// UPGRADED: Safe reload with connection error handling
 async function safeReload(retries = MAX_RETRIES) {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
+      // First check if page is healthy
       const isHealthy = await checkPageHealth();
       if (!isHealthy) {
         console.log('Page unhealthy before reload, recreating browser...');
@@ -258,11 +283,12 @@ async function safeReload(retries = MAX_RETRIES) {
         waitUntil: 'domcontentloaded',
         timeout: NAVIGATION_TIMEOUT 
       });
-      botState.connectionIssues = 0;
+      botState.connectionIssues = 0; // Reset on success
       return true;
     } catch (error) {
       logError(error, `Reload - Attempt ${attempt}/${retries}`);
       
+      // Check if it's a connection error
       if (isConnectionError(error)) {
         console.log('Connection error detected during reload');
         const currentUrl = await page.url().catch(() => 'https://territorial.io');
@@ -286,8 +312,10 @@ async function safeReload(retries = MAX_RETRIES) {
   return false;
 }
 
+// UPGRADED: Safe click with connection error handling
 async function safeClick(x, y, description = 'click') {
   try {
+    // Check page health before clicking
     const isHealthy = await checkPageHealth();
     if (!isHealthy) {
       console.log('Page unhealthy before click, skipping...');
@@ -309,6 +337,7 @@ async function safeClick(x, y, description = 'click') {
   }
 }
 
+// UPGRADED: Safe evaluate with connection error handling
 async function safeEvaluate(fn, ...args) {
   try {
     return await page.evaluate(fn, ...args);
@@ -381,14 +410,17 @@ async function runLoop(loopNum) {
   saveData(LOOP_FILE, { currentLoop: loopNum, startedAt: new Date().toISOString() });
 
   try {
+    // Step 1: Visit website
     updateState({ currentStep: `Loop ${loopNum}/20 - Step 1: Visiting website`, stepTimer: 5 });
     await safeGoto('https://territorial.io');
     await delay(5000);
 
+    // Step 2: Refresh
     updateState({ currentStep: `Loop ${loopNum}/20 - Step 2: Refreshing`, stepTimer: 1 });
     await safeReload();
     await delay(1000);
 
+    // Step 3: Set localStorage
     updateState({ currentStep: `Loop ${loopNum}/20 - Step 3: Setting localStorage` });
     const account = loadData(ACCOUNT_FILE, {});
     const cityName = getRandomCity();
@@ -402,26 +434,31 @@ async function runLoop(loopNum) {
     await safeReload();
     await delay(2000);
 
+    // Step 4: Click Multiplayer
     updateState({ currentStep: `Loop ${loopNum}/20 - Step 4: Clicking Multiplayer`, stepTimer: 5 });
     await safeClick(349, 297, 'Multiplayer');
     await delay(5000);
 
+    // Step 5: Click Team Mode
     updateState({ currentStep: `Loop ${loopNum}/20 - Step 5: Clicking Team Mode`, stepTimer: 2 });
     await safeClick(84, 55, 'Team Mode');
     await delay(2000);
 
+    // Step 6: Click Ready
     updateState({ currentStep: `Loop ${loopNum}/20 - Step 6: Clicking Ready`, stepTimer: 60 });
     await safeClick(590, 566, 'Ready');
     await delay(60000);
 
+    // Step 7: Playing (WITH CONNECTION MONITORING)
     updateState({ currentStep: `Loop ${loopNum}/20 - Step 7: Playing (8 minutes)`, stepTimer: 480 });
     const playEndTime = Date.now() + 480000;
     let lastSpace = Date.now();
     let lastScroll = Date.now();
     let lastHealthCheck = Date.now();
 
-    while (Date.now() < playEndTime) {
+    while (Date.now() < playEndTime && botState.running) {
       try {
+        // Periodic health check during long play session
         if (Date.now() - lastHealthCheck >= CONNECTION_CHECK_INTERVAL) {
           const isHealthy = await checkPageHealth();
           if (!isHealthy) {
@@ -431,6 +468,7 @@ async function runLoop(loopNum) {
               'playing', 
               'https://territorial.io'
             );
+            // Break and retry this loop
             throw new Error('Connection lost during gameplay');
           }
           lastHealthCheck = Date.now();
@@ -453,13 +491,17 @@ async function runLoop(loopNum) {
       } catch (error) {
         logError(error, 'Playing loop');
         
+        // If connection error, try to recover
         if (isConnectionError(error)) {
           console.log('Connection error during gameplay, breaking loop...');
           throw error;
         }
+        
+        // Continue playing for other errors
       }
     }
 
+    // Steps 8-11: Menu navigation
     updateState({ currentStep: `Loop ${loopNum}/20 - Step 8: Menu`, stepTimer: 1 });
     await safeClick(18, 579, 'Menu');
     await delay(1000);
@@ -476,14 +518,17 @@ async function runLoop(loopNum) {
     await safeClick(18, 579, 'Home');
     await delay(1000);
 
+    // Step 12: Settings
     updateState({ currentStep: `Loop ${loopNum}/20 - Step 12: Settings`, stepTimer: 5 });
     await safeClick(449, 363, 'Settings');
     await delay(5000);
 
+    // Step 13: Replay
     updateState({ currentStep: `Loop ${loopNum}/20 - Step 13: Replay`, stepTimer: 2 });
     await safeClick(711, 113, 'Replay');
     await delay(2000);
 
+    // Step 14: Copy replay
     updateState({ currentStep: `Loop ${loopNum}/20 - Step 14: Copying replay` });
     await safeClick(398, 303, 'Replay text area');
     await delay(1000);
@@ -512,11 +557,13 @@ async function runLoop(loopNum) {
       logError(error, 'Copy replay');
     }
 
+    // Step 15: Final refresh
     updateState({ currentStep: `Loop ${loopNum}/20 - Step 15: Refreshing` });
     await safeReload();
     await delay(1000);
     await safeReload();
 
+    // Step 16: Delay
     updateState({ currentStep: `Loop ${loopNum}/20 - Step 16: Delay`, stepTimer: 10 });
     await delay(10000);
 
@@ -524,6 +571,7 @@ async function runLoop(loopNum) {
     
   } catch (error) {
     logError(error, `runLoop ${loopNum}`);
+    // Save progress even on error
     saveData(LOOP_FILE, { 
       currentLoop: loopNum, 
       errorAt: new Date().toISOString(),
@@ -641,9 +689,11 @@ async function ensureBrowser() {
     page = await browser.newPage();
     await page.setViewport({ width: 800, height: 600 });
     
+    // Set longer default timeout
     page.setDefaultTimeout(NAVIGATION_TIMEOUT);
     page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT);
     
+    // NEW: Add error listener for connection issues
     page.on('error', async (error) => {
       console.log('Page error event:', error.message);
       if (isConnectionError(error)) {
@@ -657,19 +707,15 @@ async function ensureBrowser() {
   }
 }
 
-// Main bot loop - runs continuously
-async function runBot() {
-  console.log('='.repeat(60));
-  console.log('BOT AUTO-STARTED AT:', new Date().toISOString());
-  console.log('='.repeat(60));
-  
-  updateState({ currentStep: 'Starting browser...' });
+async function startBot() {
+  if (botState.running) return;
+
+  updateState({ running: true, currentStep: 'Starting browser...', errorCount: 0, connectionIssues: 0 });
 
   try {
     await ensureBrowser();
 
-    // Infinite loop - bot never stops
-    while (true) {
+    while (botState.running) {
       try {
         const loopData = loadData(LOOP_FILE, { currentLoop: 0 });
         let startLoop = loopData.currentLoop || 0;
@@ -694,11 +740,12 @@ async function runBot() {
           }
         }
 
-        for (let i = startLoop; i <= 20; i++) {
+        for (let i = startLoop; i <= 20 && botState.running; i++) {
           try {
             await ensureBrowser();
             await runLoop(i);
             
+            // Reset error counters on success
             botState.errorCount = 0;
             botState.connectionIssues = 0;
             
@@ -709,14 +756,15 @@ async function runBot() {
               updateState({ currentStep: `Connection error in loop ${i}, recovering...` });
               await delay(10000);
               await ensureBrowser();
-              i--;
+              i--; // Retry same loop
             } else {
               updateState({ currentStep: `Loop ${i} error, retrying in 15s...` });
               await delay(15000);
               await ensureBrowser();
-              i--;
+              i--; // Retry same loop
             }
             
+            // If we've had too many consecutive errors, skip this loop
             if (botState.errorCount > 10) {
               console.log('Too many errors, skipping to next loop');
               botState.errorCount = 0;
@@ -724,15 +772,13 @@ async function runBot() {
           }
         }
 
-        try {
-          await getGoldAndSend();
-        } catch (error) {
-          logError(error, 'getGoldAndSend');
+        if (botState.running) {
+          try {
+            await getGoldAndSend();
+          } catch (error) {
+            logError(error, 'getGoldAndSend');
+          }
         }
-        
-        // After completing all 20 loops, restart the cycle
-        console.log('Completed cycle, starting new cycle in 10 seconds...');
-        await delay(10000);
         
       } catch (error) {
         logError(error, 'Main loop');
@@ -749,58 +795,35 @@ async function runBot() {
       }
     }
   } catch (error) {
-    logError(error, 'runBot - CRITICAL');
-    // Even on critical error, wait and restart
-    console.log('Critical error occurred, restarting in 60 seconds...');
-    await delay(60000);
-    runBot(); // Restart the bot
+    logError(error, 'startBot');
+    botState.running = false;
+    updateState({ currentStep: 'Bot stopped due to critical error' });
   }
 }
 
-// Handle process termination gracefully
-process.on('SIGINT', async () => {
-  console.log('\nReceived SIGINT, cleaning up...');
+async function stopBot() {
+  botState.running = false;
+  updateState({ currentStep: 'Stopping...' });
+
   if (browser) {
     try {
       await browser.close();
     } catch (e) {
       console.log('Error closing browser:', e.message);
     }
+    browser = null;
+    page = null;
   }
-  process.exit(0);
-});
 
-process.on('SIGTERM', async () => {
-  console.log('\nReceived SIGTERM, cleaning up...');
-  if (browser) {
-    try {
-      await browser.close();
-    } catch (e) {
-      console.log('Error closing browser:', e.message);
-    }
-  }
-  process.exit(0);
-});
+  updateState({ currentStep: 'Stopped' });
+}
 
-// Catch unhandled errors and restart
-process.on('uncaughtException', (error) => {
-  console.error('Uncaught Exception:', error);
-  console.log('Restarting in 30 seconds...');
-  setTimeout(() => {
-    runBot();
-  }, 30000);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-});
-
-// AUTO-START: Run the bot immediately when module loads
-runBot();
-
-// Export state getter for monitoring (optional)
 function getState() {
   return botState;
 }
 
-module.exports = { getState };
+function togglePreview(enabled) {
+  botState.previewEnabled = enabled;
+}
+
+module.exports = { startBot, stopBot, getState, takeScreenshot, togglePreview };
