@@ -30,6 +30,7 @@ const INDIAN_CITIES = [
 
 const MAX_RETRIES = 3;
 const NAVIGATION_TIMEOUT = 30000;
+const CONNECTION_CHECK_INTERVAL = 5000; // Check connection every 5 seconds
 
 let browser = null;
 let page = null;
@@ -43,7 +44,8 @@ let botState = {
   previewEnabled: false,
   lastScreenshot: null,
   errorCount: 0,
-  lastError: null
+  lastError: null,
+  connectionIssues: 0
 };
 
 function delay(ms) {
@@ -89,6 +91,104 @@ function logError(error, context) {
   };
 }
 
+// NEW: Check if error is connection-related
+function isConnectionError(error) {
+  const connectionErrors = [
+    'ERR_CONNECTION_CLOSED',
+    'ERR_CONNECTION_REFUSED',
+    'ERR_CONNECTION_RESET',
+    'ERR_NETWORK_CHANGED',
+    'ERR_INTERNET_DISCONNECTED',
+    'ERR_NAME_NOT_RESOLVED',
+    'ERR_ADDRESS_UNREACHABLE',
+    'net::ERR_',
+    'Protocol error',
+    'Target closed',
+    'Session closed',
+    'Navigation timeout',
+    'timeout',
+    'unreachable',
+    'ECONNREFUSED',
+    'ECONNRESET',
+    'ETIMEDOUT',
+    'ENOTFOUND',
+    'closed',
+    'disconnected'
+  ];
+  
+  const errorString = error.toString().toLowerCase();
+  return connectionErrors.some(errType => 
+    errorString.includes(errType.toLowerCase())
+  );
+}
+
+// NEW: Enhanced page health check
+async function checkPageHealth() {
+  if (!page || page.isClosed()) {
+    return false;
+  }
+  
+  try {
+    // Try to evaluate a simple expression
+    await page.evaluate(() => true);
+    return true;
+  } catch (error) {
+    console.log('Page health check failed:', error.message);
+    return false;
+  }
+}
+
+// NEW: Auto-refresh on connection issues
+async function handleConnectionError(error, context, currentUrl = null) {
+  console.log(`Connection error detected in ${context}: ${error.message}`);
+  botState.connectionIssues++;
+  
+  // Try to refresh the page
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      console.log(`Attempting to recover connection (attempt ${attempt}/3)...`);
+      
+      // Check if page still exists
+      const isHealthy = await checkPageHealth();
+      
+      if (!isHealthy) {
+        console.log('Page is unhealthy, recreating browser...');
+        await ensureBrowser();
+        if (currentUrl) {
+          await safeGoto(currentUrl, 1);
+        }
+        return true;
+      }
+      
+      // Try to reload the page
+      await page.reload({ 
+        waitUntil: 'domcontentloaded',
+        timeout: NAVIGATION_TIMEOUT 
+      });
+      
+      console.log('Connection recovered successfully');
+      botState.connectionIssues = 0;
+      return true;
+      
+    } catch (retryError) {
+      console.log(`Recovery attempt ${attempt} failed:`, retryError.message);
+      
+      if (attempt === 3) {
+        console.log('All recovery attempts failed, recreating browser...');
+        await ensureBrowser();
+        if (currentUrl) {
+          await safeGoto(currentUrl, 1);
+        }
+        return false;
+      }
+      
+      await delay(3000 * attempt);
+    }
+  }
+  
+  return false;
+}
+
 async function takeScreenshot() {
   if (!page || !botState.previewEnabled) return null;
   try {
@@ -120,7 +220,7 @@ async function sendToDiscord(webhookUrl, content, options = {}) {
   }
 }
 
-// Safe navigation with retry
+// UPGRADED: Safe navigation with connection error handling
 async function safeGoto(url, retries = MAX_RETRIES) {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
@@ -128,13 +228,37 @@ async function safeGoto(url, retries = MAX_RETRIES) {
         waitUntil: 'domcontentloaded',
         timeout: NAVIGATION_TIMEOUT 
       });
+      botState.connectionIssues = 0; // Reset on success
       return true;
     } catch (error) {
       logError(error, `Navigation to ${url} - Attempt ${attempt}/${retries}`);
       
+      // Check if it's a connection error
+      if (isConnectionError(error)) {
+        console.log('Connection error detected during navigation');
+        await handleConnectionError(error, 'safeGoto', url);
+        
+        // If not last attempt, try again
+        if (attempt < retries) {
+          await delay(5000);
+          continue;
+        }
+      }
+      
       if (attempt === retries) {
-        console.log(`Failed to navigate after ${retries} attempts, continuing anyway...`);
-        return false;
+        console.log(`Failed to navigate after ${retries} attempts, will retry with fresh browser...`);
+        await ensureBrowser();
+        // One final attempt with new browser
+        try {
+          await page.goto(url, { 
+            waitUntil: 'domcontentloaded',
+            timeout: NAVIGATION_TIMEOUT 
+          });
+          return true;
+        } catch (finalError) {
+          console.log('Final navigation attempt failed');
+          return false;
+        }
       }
       
       await delay(3000 * attempt);
@@ -143,20 +267,42 @@ async function safeGoto(url, retries = MAX_RETRIES) {
   return false;
 }
 
-// Safe reload with retry
+// UPGRADED: Safe reload with connection error handling
 async function safeReload(retries = MAX_RETRIES) {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
+      // First check if page is healthy
+      const isHealthy = await checkPageHealth();
+      if (!isHealthy) {
+        console.log('Page unhealthy before reload, recreating browser...');
+        await ensureBrowser();
+        return false;
+      }
+      
       await page.reload({ 
         waitUntil: 'domcontentloaded',
         timeout: NAVIGATION_TIMEOUT 
       });
+      botState.connectionIssues = 0; // Reset on success
       return true;
     } catch (error) {
       logError(error, `Reload - Attempt ${attempt}/${retries}`);
       
+      // Check if it's a connection error
+      if (isConnectionError(error)) {
+        console.log('Connection error detected during reload');
+        const currentUrl = await page.url().catch(() => 'https://territorial.io');
+        await handleConnectionError(error, 'safeReload', currentUrl);
+        
+        if (attempt < retries) {
+          await delay(3000);
+          continue;
+        }
+      }
+      
       if (attempt === retries) {
-        console.log(`Failed to reload after ${retries} attempts, continuing anyway...`);
+        console.log(`Failed to reload after ${retries} attempts, recreating browser...`);
+        await ensureBrowser();
         return false;
       }
       
@@ -166,23 +312,44 @@ async function safeReload(retries = MAX_RETRIES) {
   return false;
 }
 
-// Safe click with error handling
+// UPGRADED: Safe click with connection error handling
 async function safeClick(x, y, description = 'click') {
   try {
+    // Check page health before clicking
+    const isHealthy = await checkPageHealth();
+    if (!isHealthy) {
+      console.log('Page unhealthy before click, skipping...');
+      return false;
+    }
+    
     await page.mouse.click(x, y);
     return true;
   } catch (error) {
     logError(error, `Click at (${x}, ${y}) - ${description}`);
+    
+    if (isConnectionError(error)) {
+      console.log('Connection error during click');
+      const currentUrl = await page.url().catch(() => 'https://territorial.io');
+      await handleConnectionError(error, 'safeClick', currentUrl);
+    }
+    
     return false;
   }
 }
 
-// Safe evaluate with error handling
+// UPGRADED: Safe evaluate with connection error handling
 async function safeEvaluate(fn, ...args) {
   try {
     return await page.evaluate(fn, ...args);
   } catch (error) {
     logError(error, 'Page evaluate');
+    
+    if (isConnectionError(error)) {
+      console.log('Connection error during evaluate');
+      const currentUrl = await page.url().catch(() => 'https://territorial.io');
+      await handleConnectionError(error, 'safeEvaluate', currentUrl);
+    }
+    
     return null;
   }
 }
@@ -282,14 +449,31 @@ async function runLoop(loopNum) {
     await safeClick(590, 566, 'Ready');
     await delay(60000);
 
-    // Step 7: Playing
+    // Step 7: Playing (WITH CONNECTION MONITORING)
     updateState({ currentStep: `Loop ${loopNum}/20 - Step 7: Playing (8 minutes)`, stepTimer: 480 });
     const playEndTime = Date.now() + 480000;
     let lastSpace = Date.now();
     let lastScroll = Date.now();
+    let lastHealthCheck = Date.now();
 
     while (Date.now() < playEndTime && botState.running) {
       try {
+        // Periodic health check during long play session
+        if (Date.now() - lastHealthCheck >= CONNECTION_CHECK_INTERVAL) {
+          const isHealthy = await checkPageHealth();
+          if (!isHealthy) {
+            console.log('Connection lost during play, attempting recovery...');
+            await handleConnectionError(
+              new Error('Connection lost during gameplay'), 
+              'playing', 
+              'https://territorial.io'
+            );
+            // Break and retry this loop
+            throw new Error('Connection lost during gameplay');
+          }
+          lastHealthCheck = Date.now();
+        }
+        
         const x = 100 + Math.random() * 600;
         const y = 50 + Math.random() * 250;
         await page.mouse.move(x, y, { steps: 10 });
@@ -306,7 +490,14 @@ async function runLoop(loopNum) {
         botState.stepTimer = Math.ceil((playEndTime - Date.now()) / 1000);
       } catch (error) {
         logError(error, 'Playing loop');
-        // Continue playing even if individual actions fail
+        
+        // If connection error, try to recover
+        if (isConnectionError(error)) {
+          console.log('Connection error during gameplay, breaking loop...');
+          throw error;
+        }
+        
+        // Continue playing for other errors
       }
     }
 
@@ -501,13 +692,25 @@ async function ensureBrowser() {
     // Set longer default timeout
     page.setDefaultTimeout(NAVIGATION_TIMEOUT);
     page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT);
+    
+    // NEW: Add error listener for connection issues
+    page.on('error', async (error) => {
+      console.log('Page error event:', error.message);
+      if (isConnectionError(error)) {
+        await handleConnectionError(error, 'page error event');
+      }
+    });
+    
+    page.on('close', () => {
+      console.log('Page closed unexpectedly');
+    });
   }
 }
 
 async function startBot() {
   if (botState.running) return;
 
-  updateState({ running: true, currentStep: 'Starting browser...', errorCount: 0 });
+  updateState({ running: true, currentStep: 'Starting browser...', errorCount: 0, connectionIssues: 0 });
 
   try {
     await ensureBrowser();
@@ -523,8 +726,15 @@ async function startBot() {
             startLoop = 1;
           } catch (error) {
             logError(error, 'Account creation failed');
-            updateState({ currentStep: 'Retrying account creation in 10s...' });
-            await delay(10000);
+            
+            if (isConnectionError(error)) {
+              updateState({ currentStep: 'Connection error during account creation, retrying in 15s...' });
+              await delay(15000);
+            } else {
+              updateState({ currentStep: 'Retrying account creation in 10s...' });
+              await delay(10000);
+            }
+            
             await ensureBrowser();
             continue;
           }
@@ -534,13 +744,25 @@ async function startBot() {
           try {
             await ensureBrowser();
             await runLoop(i);
+            
+            // Reset error counters on success
+            botState.errorCount = 0;
+            botState.connectionIssues = 0;
+            
           } catch (error) {
             logError(error, `Loop ${i} failed`);
-            updateState({ currentStep: `Loop ${i} error, retrying in 15s...` });
-            await delay(15000);
-            await ensureBrowser();
-            // Retry the same loop
-            i--;
+            
+            if (isConnectionError(error)) {
+              updateState({ currentStep: `Connection error in loop ${i}, recovering...` });
+              await delay(10000);
+              await ensureBrowser();
+              i--; // Retry same loop
+            } else {
+              updateState({ currentStep: `Loop ${i} error, retrying in 15s...` });
+              await delay(15000);
+              await ensureBrowser();
+              i--; // Retry same loop
+            }
             
             // If we've had too many consecutive errors, skip this loop
             if (botState.errorCount > 10) {
@@ -560,8 +782,15 @@ async function startBot() {
         
       } catch (error) {
         logError(error, 'Main loop');
-        updateState({ currentStep: 'Critical error, restarting in 30s...' });
-        await delay(30000);
+        
+        if (isConnectionError(error)) {
+          updateState({ currentStep: 'Connection error in main loop, restarting in 20s...' });
+          await delay(20000);
+        } else {
+          updateState({ currentStep: 'Critical error, restarting in 30s...' });
+          await delay(30000);
+        }
+        
         await ensureBrowser();
       }
     }
