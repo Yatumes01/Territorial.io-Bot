@@ -17,11 +17,6 @@ app.post('/api/start', async (req, res) => {
   res.json({ success: true });
 });
 
-app.post('/api/stop', async (req, res) => {
-  await bot.stopBot();
-  res.json({ success: true });
-});
-
 app.post('/api/preview', (req, res) => {
   const { enabled } = req.body;
   bot.togglePreview(enabled);
