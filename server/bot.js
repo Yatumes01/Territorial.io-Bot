@@ -80,6 +80,10 @@ function updateState(updates) {
   Object.assign(botState, updates);
 }
 
+function getState() {
+  return botState;
+}
+
 function logError(error, context) {
   const errorMsg = `[${context}] ${error.message}`;
   console.error(errorMsg);
@@ -810,3 +814,15 @@ async function startBot() {
     process.exit(1);
   }
 })();
+module.exports = {
+  getState,
+  startBot,
+  
+ 
+  togglePreview,
+  takeScreenshot
+};
+
+function togglePreview(enabled) {
+  updateState({ previewEnabled: enabled });
+}
