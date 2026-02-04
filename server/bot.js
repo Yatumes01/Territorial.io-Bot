@@ -363,6 +363,88 @@ async function safeEvaluate(fn, ...args) {
   }
 }
 
+// NEW: Wait for ready signal - either console message or timeout (whichever comes first).
+async function waitForReadySignal(maxWaitMs = 30000) {
+  if (!page || page.isClosed()) {
+    return { type: 'error', reason: 'no-page' };
+  }
+
+  return new Promise((resolve) => {
+    let resolved = false;
+    const start = Date.now();
+
+    // initialize step timer (seconds)
+    updateState({ stepTimer: Math.ceil(maxWaitMs / 1000) });
+
+    const interval = setInterval(() => {
+      const elapsed = Date.now() - start;
+      const remaining = maxWaitMs - elapsed;
+      updateState({ stepTimer: Math.max(0, Math.ceil(remaining / 1000)) });
+
+      if (remaining <= 0 && !resolved) {
+        resolved = true;
+        cleanup();
+        resolve({ type: 'timeout' });
+      }
+    }, 500);
+
+    function onConsole(msg) {
+      try {
+        const text = msg.text();
+        console.log('Page console:', text);
+
+        // If any console message arrives, or it contains 'delayed pass', resolve immediately.
+        if (!resolved) {
+          resolved = true;
+          cleanup();
+          resolve({ type: 'console', text });
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    function cleanup() {
+      clearInterval(interval);
+      try { page.off('console', onConsole); } catch (e) {}
+      updateState({ stepTimer: 0 });
+    }
+
+    page.on('console', onConsole);
+  });
+}
+
+// NEW: Remove and recreate the entire chrome user-data directory
+function resetChromeData() {
+  try {
+    // Safety: Do not accidentally delete root or very short paths
+    if (!CHROME || CHROME === '/' || CHROME.length < 6) {
+      console.log('Refusing to reset CHROME path for safety:', CHROME);
+      return;
+    }
+
+    if (fs.existsSync(CHROME)) {
+      console.log('Removing chrome user-data directory:', CHROME);
+      try {
+        fs.rmSync(CHROME, { recursive: true, force: true });
+      } catch (e) {
+        console.log('fs.rmSync failed, attempting rmdir fallback:', e.message);
+        try {
+          fs.rmdirSync(CHROME, { recursive: true });
+        } catch (e2) {
+          console.log('Fallback rmdirSync also failed:', e2.message);
+        }
+      }
+    }
+
+    // Recreate directory
+    fs.mkdirSync(CHROME, { recursive: true });
+    console.log('Recreated chrome user-data directory:', CHROME);
+  } catch (e) {
+    console.log('Error resetting chrome data:', e.message);
+  }
+}
+
 async function createAccount() {
   updateState({ currentStep: 'Creating account...' });
 
@@ -454,13 +536,26 @@ async function runLoop(loopNum) {
     await delay(2000);
 
     // Step 6: Click Ready
-    updateState({ currentStep: `Loop ${loopNum}/20 - Step 6: Clicking Ready`, stepTimer: 60 });
+    updateState({ currentStep: `Loop ${loopNum}/20 - Step 6: Clicking Ready`, stepTimer: 30 });
     await safeClick(590, 566, 'Ready');
-    await delay(60000);
+    await delay(500);
 
-    // Step 7: Playing (WITH CONNECTION MONITORING)
-    updateState({ currentStep: `Loop ${loopNum}/20 - Step 7: Playing (8 minutes)`, stepTimer: 480 });
-    const playEndTime = Date.now() + 480000;
+    // NEW: Wait for the earliest of (30s timeout) OR a console message (e.g., 'delayed pass')
+    try {
+      const result = await waitForReadySignal(30000);
+      if (result && result.type === 'console') {
+        console.log(`Ready signal received from console: ${result.text}`);
+      } else {
+        console.log('Ready wait timed out (30s), continuing...');
+      }
+    } catch (e) {
+      console.log('Error waiting for ready signal:', e.message);
+    }
+
+    // Step 7: Playing (WITH CONNECTION MONITORING) - changed to 4.5 minutes (270 seconds)
+    const PLAY_DURATION_MS = 4.5 * 60 * 1000; // 270000 ms
+    updateState({ currentStep: `Loop ${loopNum}/20 - Step 7: Playing (4.5 minutes)`, stepTimer: Math.ceil(PLAY_DURATION_MS / 1000) });
+    const playEndTime = Date.now() + PLAY_DURATION_MS;
     let lastSpace = Date.now();
     let lastScroll = Date.now();
     let lastHealthCheck = Date.now();
@@ -510,35 +605,51 @@ async function runLoop(loopNum) {
       }
     }
 
-    // Steps 8-11: Menu navigation
+    // Steps after playing: Menu -> More -> Surrender -> Menu -> Exit -> Close -> Home -> Settings...
     updateState({ currentStep: `Loop ${loopNum}/20 - Step 8: Menu`, stepTimer: 1 });
     await safeClick(18, 579, 'Menu');
     await delay(1000);
 
-    updateState({ currentStep: `Loop ${loopNum}/20 - Step 9: Exit`, stepTimer: 5 });
+    // New Step: Click More button instead of immediately Exit
+    updateState({ currentStep: `Loop ${loopNum}/20 - Step 9: More`, stepTimer: 1 });
+    await safeClick(29, 549, 'More');
+    await delay(1000);
+
+    // New Step: Click Surrender
+    updateState({ currentStep: `Loop ${loopNum}/20 - Step 10: Surrender`, stepTimer: 2 });
+    await safeClick(240, 115, 'Surrender');
+    await delay(2000);
+
+    // Click Menu again
+    updateState({ currentStep: `Loop ${loopNum}/20 - Step 11: Menu (post-surrender)`, stepTimer: 1 });
+    await safeClick(18, 579, 'Menu');
+    await delay(1000);
+
+    // Continue with Exit / Close / Home
+    updateState({ currentStep: `Loop ${loopNum}/20 - Step 12: Exit`, stepTimer: 5 });
     await safeClick(18, 579, 'Exit');
     await delay(5000);
 
-    updateState({ currentStep: `Loop ${loopNum}/20 - Step 10: Close`, stepTimer: 3 });
+    updateState({ currentStep: `Loop ${loopNum}/20 - Step 13: Close`, stepTimer: 3 });
     await safeClick(18, 579, 'Close');
     await delay(3000);
 
-    updateState({ currentStep: `Loop ${loopNum}/20 - Step 11: Home`, stepTimer: 1 });
+    updateState({ currentStep: `Loop ${loopNum}/20 - Step 14: Home`, stepTimer: 1 });
     await safeClick(18, 579, 'Home');
     await delay(1000);
 
-    // Step 12: Settings
-    updateState({ currentStep: `Loop ${loopNum}/20 - Step 12: Settings`, stepTimer: 5 });
+    // Step 15: Settings (adjusted numbering)
+    updateState({ currentStep: `Loop ${loopNum}/20 - Step 15: Settings`, stepTimer: 5 });
     await safeClick(449, 363, 'Settings');
     await delay(5000);
 
-    // Step 13: Replay
-    updateState({ currentStep: `Loop ${loopNum}/20 - Step 13: Replay`, stepTimer: 2 });
+    // Step 16: Replay
+    updateState({ currentStep: `Loop ${loopNum}/20 - Step 16: Replay`, stepTimer: 2 });
     await safeClick(711, 113, 'Replay');
     await delay(2000);
 
-    // Step 14: Copy replay
-    updateState({ currentStep: `Loop ${loopNum}/20 - Step 14: Copying replay` });
+    // Step 17: Copy replay
+    updateState({ currentStep: `Loop ${loopNum}/20 - Step 17: Copying replay` });
     await safeClick(398, 303, 'Replay text area');
     await delay(1000);
     
@@ -566,14 +677,14 @@ async function runLoop(loopNum) {
       logError(error, 'Copy replay');
     }
 
-    // Step 15: Final refresh
-    updateState({ currentStep: `Loop ${loopNum}/20 - Step 15: Refreshing` });
+    // Step 18: Final refresh
+    updateState({ currentStep: `Loop ${loopNum}/20 - Step 18: Refreshing` });
     await safeReload();
     await delay(1000);
     await safeReload();
 
-    // Step 16: Delay
-    updateState({ currentStep: `Loop ${loopNum}/20 - Step 16: Delay`, stepTimer: 10 });
+    // Step 19: Delay
+    updateState({ currentStep: `Loop ${loopNum}/20 - Step 19: Delay`, stepTimer: 10 });
     await delay(10000);
 
     saveData(LOOP_FILE, { currentLoop: loopNum, completedAt: new Date().toISOString() });
@@ -676,6 +787,9 @@ async function ensureBrowser() {
   if (!browser || !page || page.isClosed()) {
     console.log('Recreating browser instance...');
     
+    // Reset chrome-data directory before launching a new browser to avoid "profile in use" errors
+    resetChromeData();
+
     if (browser) {
       try {
         await browser.close();
@@ -723,6 +837,9 @@ async function ensureBrowser() {
 
 async function startBot() {
   if (botState.running) return;
+
+  // Remove and recreate chrome-data on startup to avoid "profile in use" errors
+  resetChromeData();
 
   updateState({ running: true, currentStep: 'Starting browser...', errorCount: 0, connectionIssues: 0 });
 
@@ -827,8 +944,6 @@ async function startBot() {
 module.exports = {
   getState,
   startBot,
-  
- 
   togglePreview,
   takeScreenshot
 };
