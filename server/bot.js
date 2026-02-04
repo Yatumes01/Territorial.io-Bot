@@ -692,7 +692,11 @@ async function ensureBrowser() {
         '--disable-setuid-sandbox', 
         '--disable-dev-shm-usage', 
         '--disable-web-security', 
-        '--allow-running-insecure-content'
+        '--allow-running-insecure-content',
+        '--disable-features=IsolateOrigins,site-per-process',
+        '--disable-site-isolation-trials',
+        '--disable-features=BlockThirdPartyCookies',
+        '--enable-local-storage'
       ]
     });
 
