@@ -6,6 +6,11 @@ const DATA_DIR = path.join(__dirname, '..', 'data');
 const ACCOUNT_FILE = path.join(DATA_DIR, 'account.json');
 const LOOP_FILE = path.join(DATA_DIR, 'loop.json');
 const REPLAY_FILE = path.join(DATA_DIR, 'replay.txt');
+const CHROME = path.join(__dirname, '..', 'chrome-data');
+
+if (!fs.existsSync(CHROME)) {
+  fs.mkdirSync(CHROME, { recursive: true });
+}
 
 const DISCORD_REPLAY_WEBHOOK = 'https://discord.com/api/webhooks/1467283931526332654/ka_L-jSiEm6bwaY3LsrJaF8wf1ZSexok2DuqtK39G8w_Cb7oSDFjHPUN61zUnS4iiJot';
 const DISCORD_ACCOUNT_WEBHOOK = 'https://discord.com/api/webhooks/1467286140808593522/s6Kye5OzqnVxyIGQPi9oHjzE1gRLi9EROff53Ugcc9hYeCADUgO7C5Yz1T1HiVNglpoL';
@@ -681,6 +686,7 @@ async function ensureBrowser() {
 
     browser = await puppeteer.launch({
       headless: "new",
+      userDataDir: CHROME,
       args: [
         '--no-sandbox', 
         '--disable-setuid-sandbox', 
