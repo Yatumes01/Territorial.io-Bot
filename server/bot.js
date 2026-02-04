@@ -518,7 +518,7 @@ async function runLoop(loopNum) {
     await safeEvaluate((acc, city) => {
       if (acc.d105) localStorage.setItem('d105', acc.d105);
       if (acc.d106) localStorage.setItem('d106', acc.d106);
-      localStorage.setItem('d122', `[IND] ${city}`);
+      localStorage.setItem('d122', ` ${city}`);
     }, account, cityName);
     
     updateState({ currentStep: `Loop ${loopNum}/20 - Step 3.5: Refreshing to apply settings` });
